@@ -2483,24 +2483,24 @@ fn setSelectionAndCopy(self: *Surface, sel: terminal.Selection) !void {
         .none => {},
 
         // The selection clipboard is set if supported, otherwise nothing is copied.
-        .primary => try self.copySelectionToClipboards(
+        .primary => |format| try self.copySelectionToClipboards(
             sel,
             &.{.selection},
-            .mixed,
+            format,
         ),
 
         // Only the standard clipboard is set.
-        .clipboard => try self.copySelectionToClipboards(
+        .clipboard => |format| try self.copySelectionToClipboards(
             sel,
             &.{.standard},
-            .mixed,
+            format,
         ),
 
         // Both standard and selection clipboards are set.
-        .both => try self.copySelectionToClipboards(
+        .both => |format| try self.copySelectionToClipboards(
             sel,
             &.{ .standard, .selection },
-            .mixed,
+            format,
         ),
     }
 }

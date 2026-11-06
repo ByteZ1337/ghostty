@@ -42,6 +42,7 @@ const KeyRemapSet = @import("../input/key_mods.zig").RemapSet;
 pub const WindowPaddingBalance = @import("../renderer/size.zig").PaddingBalance;
 const string = @import("string.zig");
 const Limit = @import("limit.zig").Limit;
+const CopyToClipboard = @import("../input/Binding.zig").Action.CopyToClipboard;
 
 // We do this instead of importing all of terminal/main.zig to
 // limit the dependency graph. This is important because some things
@@ -2541,9 +2542,14 @@ keybind: Keybinds = .{},
 /// `primary` on Linux and `clipboard` on macOS, and `false` is an alias for
 /// `none`.
 ///
+/// The type of the clipboard content can be specified by adding a `:` and
+/// the type after the value. The type can be `plain`, `vt`, `html` or `mixed`
+/// (default). For example, `primary:plain` will copy to the primary clipboard
+/// and use plain text only.
+///
 /// The default value is `primary` on Linux and `none` otherwise.
 @"copy-on-select": CopyOnSelect = switch (builtin.target.os.tag) {
-    .linux => .primary,
+    .linux => CopyOnSelect{ .primary = .default },
     else => .none,
 },
 
@@ -5141,8 +5147,8 @@ fn compatCopyOnSelect(
 
     if (std.mem.eql(u8, value orelse "", "true")) {
         self.@"copy-on-select" = switch (builtin.target.os.tag) {
-            .linux, .freebsd => .primary,
-            else => .clipboard,
+            .linux, .freebsd => CopyOnSelect{ .primary = .default },
+            else => CopyOnSelect{ .clipboard = .default },
         };
         return true;
     }
@@ -8848,21 +8854,100 @@ pub const RepeatableLink = struct {
 };
 
 /// Options for copy on select behavior.
-pub const CopyOnSelect = enum {
+pub const CopyOnSelect = union(enum) {
+    const Self = @This();
+
     /// Disables copy on select entirely. This is the default on macOS.
     none,
 
     /// Copy on select is enabled, but goes to the selection clipboard.
     /// This is not supported on platforms such as macOS. This is the default
     /// on Linux.
-    primary,
+    primary: CopyToClipboard,
 
     /// Copy on select is enabled and goes to the system clipboard.
-    clipboard,
+    clipboard: CopyToClipboard,
 
     /// Copy on select is enabled and goes to both the system clipboard
     /// and the selection clipboard (for Linux).
-    both,
+    both: CopyToClipboard,
+
+    pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
+        const input = input_ orelse return error.ValueRequired;
+
+        // Fall back to the default clipboard format if no tag is specified.
+        if (std.mem.indexOfScalar(u8, input, ':') == null) {
+            const tag = std.meta.stringToEnum(std.meta.Tag(Self), input) orelse
+                return error.InvalidValue;
+
+            self.* = switch (tag) {
+                .none => .none,
+                .primary => .{ .primary = .default },
+                .clipboard => .{ .clipboard = .default },
+                .both => .{ .both = .default },
+            };
+            return;
+        }
+
+        self.* = try cli.args.parseTaggedUnion(Self, alloc, input);
+    }
+
+    pub fn format(self: Self, writer: *std.Io.Writer) !void {
+        try writer.print("{s}", .{@tagName(self)});
+        switch (self) {
+            .none => {},
+            .primary, .clipboard, .both => |f| try writer.print(":{t}", .{f}),
+        }
+    }
+
+    /// Used by Formatter
+    pub fn formatEntry(self: Self, formatter: formatterpkg.EntryFormatter) !void {
+        var buf: [32]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try self.format(&writer);
+        try formatter.formatEntry([]const u8, writer.buffered());
+    }
+
+    pub fn cval(self: Self) [*:0]const u8 {
+        return @tagName(self);
+    }
+
+    test "parseCLI" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var p: Self = .{ .none = {} };
+        try p.parseCLI(alloc, "none");
+        try testing.expectEqual(Self{ .none = {} }, p);
+
+        try p.parseCLI(alloc, "primary");
+        try testing.expectEqual(Self{ .primary = .default }, p);
+
+        try p.parseCLI(alloc, "clipboard:plain");
+        try testing.expectEqual(Self{ .clipboard = .plain }, p);
+    }
+
+    test "formatConfig none" {
+        const testing = std.testing;
+        var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer buf.deinit();
+
+        var p: Self = .{ .none = {} };
+        try p.formatEntry(formatterpkg.entryFormatter("a", &buf.writer));
+        try std.testing.expectEqualSlices(u8, "a = none\n", buf.written());
+    }
+
+    test "formatConfig nested" {
+        const testing = std.testing;
+        var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer buf.deinit();
+
+        var p: Self = .{ .both = .mixed };
+        try p.formatEntry(formatterpkg.entryFormatter("a", &buf.writer));
+        try std.testing.expectEqualSlices(u8, "a = both:mixed\n", buf.written());
+    }
 };
 
 /// Options for right-click actions.
